@@ -1,0 +1,1570 @@
+' "the Digger" by Arda Erdikmen (c)2014
+
+' Using Python based Zx Compiler by Boriel
+' Powered by Bi*Frost Multicolor Engine
+
+' compile with>  zxb theDigger.zxb -t --org=34496
+
+' todo:
+'
+' sack space warning fix
+' map
+' chests
+' seismic charge
+' elevators
+' 
+
+#include "bifrost.bas"
+#define GetPos(mx, my)   PEEK(25088+(my*48)+mx)
+#define mapsize 48
+#define maxdepth 159
+
+memory:
+
+#define map 27016
+
+'each mine mx=48 my=160 -> total 7680 bytes 
+'program starts at 32768 also stack resides there (1300bytes available for stack)
+
+'bifrost tiles, a space for 52 tiles is available at:
+BIFROSTresetTileImages(24200)
+
+'POKE 64994,INT (addr/256): POKE 64993,addr-256*PEEK 64994
+
+
+
+' this information is not necessaryly accurate! :)
+
+' The Digger Tile Properties Format (8bits)
+' <4bits tile life ><4bits tile type>
+
+' tile types:
+' 0-Hollow 0:0    1-Rock 4:4 (unbreakable)
+' 2-Dirt 3:0      3-Copper 4:0
+' 4-Tin 2:1       5-Iron 3:2
+' 6-Cobalt 4:2    7-Silver 3:3
+' 8-Ruby 2:4      9-Gold 3:4
+'10-Sapphire 4:4 11-Diamond  4:4
+'12-Support      13-Ladder
+'14-Chest(0..15) 15-Elevator  (0 or 1)
+
+'
+' Life (if type >0):
+'  <2 bits precision> <2 bits power>
+'  prec = 0 still ok. if prec < 0 then it loses power.
+'  if a block's life is 0:0 it's alive. it's type resets to 0 when broken
+'  eg. dirt has 0 power with 3 precision
+'
+'     with a 1-0 axe, it needs 6 hits to brake
+'     with a 1-1 axe, it needs 2 hits to brake
+'     with a 2-2 axe, it needs 2 hits to brake
+'     with a 3-0 axe, it needs 1 hits to brake.
+'
+
+'Elevators station = item type 15,
+'          shaft= type 12, stat=?
+
+'Chests power
+' 0- Mystic(random) 1-Map
+' 2- Fossil         3-Food
+' 4- 5*support      5-5*ladder
+'14- Teleport to previous mine 15- Teleport to next mine
+
+
+
+dim town, tempS as string
+dim townpos as byte 					'x position of the town, default pos=10 (town is 20 tiles wide)
+town="RO##O.....12...+++++RF#D#*****34*****G*RR+++++++++++++++RIR                  I                   I                   I                  XIX                  X  "
+townpos=10
+
+DIM tiles(15) AS STRING                 ' tile names 
+dim tilestats(15,1) as BYTE             ' tile type default properties - tile 0= precision, 1= power
+dim tilePrice(15) as integer			' prices of metals
+
+DIM sack (15) as BYTE                   ' carrying sack data (see tiles array)
+DIM sacksize as UBYTE                   ' carrying sack size
+DIM sackpointer as BYTE                 ' last pointer
+dim total, money as Long				' the goal of the game :) more money
+
+Dim storeItems(12,10) as string			' Shoppping items text
+dim level(12) as byte                	' player levels as store items
+dim price(12,9) as integer				' and prices (x,0) is used as inventory
+dim lastItem, item, inStore as byte		' store item selector
+dim selectedItem, inMenu as byte		' inventory menu
+dim lantern, lanternTown, lanternCrop, lanternTurnoff as UBYTE     ' Lantern radius
+
+DIM axeWg, axePower, axePrec as byte	' axe props at players hand
+DIM tileType, tilePrec, tilePower as BYTE ' tile props in heading direction
+DIM px, py AS integer                   ' Player position on map
+dim energy, energyMax as integer	    ' player energy 
+dim ps, psr, psa as UBYTE               ' Player sprite and player sprite rotation
+
+dim ti as UBYTE                         ' Holds tile number as a byte
+dim tot as UINTEGER                     ' Total gem count
+dim values as long						' total value of this level
+
+dim frame, lastFrame, diffFrame as uinteger             'game frame
+dim second, statusTimeout as byte						'tick count
+
+dim headingX,headingY, cropX1, cropX2, cropY1, cropY2 as BYTE
+dim ty,tx,y,x as integer                ' Temporary integers used on For..Next loops
+
+dim cell,stat,tile, prec,pow as ubyte   ' for bitwise operations (cell properties)
+
+dim oTile, oDeep, oTop, oLot as ubyte 	' used when collapsing blocks
+
+dim tempX,tempY,tempK,tempL as uByte 	' temporary definitions
+dim bip as byte							' used for beeper sound calculations
+
+dim tempArray(32,2) as ubyte 			' temporary array for work lists
+dim collapse(32,1) as ubyte				' queue for collapsing things, 0=x,1=y,2=active?
+dim collapseActive(32) as byte			' queue for collapsing things, active?
+
+dim collapsePointer as byte				' and pointer
+
+dim sound, forceUpdate as byte 				' 1 byte sound queue :) and force bifrostrefresh
+
+dim bifrostRefresh as byte				' if monitor needs to be refreshed
+dim falling, dead as byte						' player is falling down
+dim elevator as byte					' riding an elevator up or down
+
+dim yy, k as UINTEGER					' more temp
+dim zar as FLOAT						' more temp vars
+
+'game defaults
+
+'sack(99,0)=15	'Ladders
+'sack(99,1)=5    'Supports
+'sack(98,0)=0    'Elevator base
+'sack(98,1)=0    'Elevator rails
+
+
+'Store Data
+storeItems(0,1)="Small"
+storeItems(0,2)="Medium"
+storeItems(0,3)="Large"
+storeItems(0,4)="X-Large"
+storeItems(0,5)="Spark"
+storeItems(0,6)="Round"
+storeItems(0,7)="Star"
+storeItems(0,8)="Huge"
+storeItems(0,9)="Pro"
+storeItems(0,0)="Lamp"
+price(0,1)=150
+price(0,2)=250
+price(0,3)=300
+price(0,4)=200
+price(0,5)=650
+price(0,6)=750
+price(0,7)=1200
+price(0,8)=1000
+price(0,9)=2000
+
+
+storeItems(1,0)="Sack"
+storeItems(1,1)="Tiny"
+storeItems(1,2)="Canvas"
+storeItems(1,3)="Medium"
+storeItems(1,4)="Large"
+storeItems(1,5)="Huge"
+storeItems(1,6)="Arctic"
+storeItems(1,7)="Big"
+storeItems(1,8)="Pro"
+storeItems(1,9)="Ultra"
+price(1,1)=220
+price(1,2)=450
+price(1,3)=600
+price(1,4)=750
+price(1,5)=1000
+price(1,6)=1500
+price(1,7)=1800
+price(1,8)=2200
+price(1,9)=5000
+
+storeItems(2,0)="Campsite"
+storeItems(2,1)="Sleeping Bag"
+storeItems(2,2)="Camp Fire"
+storeItems(2,3)="Hammock"
+storeItems(2,4)="Camp Bed"
+storeItems(2,5)="Small Bed"
+storeItems(2,6)="Comfy Bed"
+storeItems(2,7)="Luxury Bed"
+storeItems(2,8)="Tea Machine"
+storeItems(2,9)="Cofee Pot"
+price(2,1)=220
+price(2,2)=270
+price(2,3)=400
+price(2,4)=650
+price(2,5)=1120
+price(2,6)=1330
+price(2,7)=1500
+price(2,8)=1850
+price(2,9)=2250
+
+storeItems(3,0)="Axe Head"
+storeItems(3,1)="Ignorance"
+storeItems(3,2)="Lethargy"
+storeItems(3,3)="Precision"
+price(3,1)=400
+price(3,2)=500
+price(3,3)=1250
+
+storeItems(4,0)="Axe Handle"
+storeItems(4,1)="Crude"
+storeItems(4,2)="Steel"
+storeItems(4,3)="Almighty"
+price(4,1)=1540
+price(4,2)=1860
+price(4,3)=2450
+
+storeItems(5,0)="Axe Build"
+storeItems(5,1)="Handy"
+storeItems(5,2)="Balanced"
+storeItems(5,3)="Joyful"
+storeItems(5,4)="Flying"
+price(5,1)=400
+price(5,2)=900
+price(5,3)=1600
+price(5,4)=2000
+
+'Balanced Almighty pickaxe of Precision
+
+storeItems(6,0)="Support"
+price(6,1)=10
+
+storeItems(7,0)="Ladder"
+price(7,1)=12
+
+storeItems(8,0)="Walkway"
+price(8,1)=1000
+
+storeItems(9,0)="MediKit"
+price(9,1)=185
+
+storeItems(10,0)="Elevator R8"
+price(10,1)=550
+
+storeItems(11,0)="Radar"
+price(11,1)=155
+
+
+'all tiles
+tiles(0)="Cave"
+tilestats(0,0)=1
+tilestats(0,1)=1
+tilePrice(0)=0
+
+tiles(1)="Rock"
+tilestats(1,0)=1
+tilestats(1,1)=1
+tilePrice(1)=0
+
+tiles(2)="Dirt"
+tilestats(2,0)=3
+tilestats(2,1)=1
+tilePrice(2)=0
+
+tiles(3)="Copper"
+tilestats(3,0)=4
+tilestats(3,1)=1
+tilePrice(3)=21
+
+tiles(4)="Tin"
+tilestats(4,0)=2
+tilestats(4,1)=1
+tilePrice(4)=25
+
+tiles(5)="Iron"
+tilestats(5,0)=3
+tilestats(5,1)=2
+tilePrice(5)=34
+
+
+tiles(6)="Opal"
+tilestats(6,0)=4
+tilestats(6,1)=2
+tilePrice(6)=47
+
+tiles(7)="Silver"
+tilestats(7,0)=3
+tilestats(7,1)=3
+tilePrice(7)=62
+
+tiles(8)="Ruby"
+tilestats(8,0)=2
+tilestats(8,1)=4
+tilePrice(8)=81
+
+tiles(9)="Gold"
+tilestats(9,0)=3
+tilestats(9,1)=4
+tilePrice(9)=102
+
+tiles(10)="Sapphire"
+tilestats(10,0)=4
+tilestats(10,1)=4
+tilePrice(10)=120
+
+tiles(11)="Diamond"
+tilestats(11,0)=4
+tilestats(11,1)=4
+tilePrice(11)=130
+
+tiles(12)="Chest"
+tilePrice(12)=150
+
+tiles(13)="Ladder"
+tiles(14)="Support"
+tiles(15)="Elevator"
+
+
+lastItem=99   'force refresh buy screen
+collapsePointer=0
+forceUpdate=1		   'this makes the game slow, but screen updates fast
+
+lantern=0     'light radius
+lanternCrop=1 'renderbox
+
+px=townpos+15  'starting pos
+py=1
+psr=34         'starting sprite
+headingX=1     '1=left -1=right
+headingY=0     '1=down -1=up
+
+axeWg=5-level(5)	   'lighter is better
+
+level(3)=1				'precision 
+axePrec=level(3)		'bigger is better
+axePower=level(4)		'//
+
+energyMax=1000		
+energy=energyMax	
+
+money=150
+
+sacksize=10
+
+price(6,0)=10 ' supports
+price(7,0)=20 ' ladders
+price(9,0)=1  ' medikit
+bifrostRefresh=1
+
+'"Heavy Crude Pickaxe of Ignorance"
+
+dim lanternMask(80) as byte => {9,8,8,7,7,7,8,8,9,8,7,6,5,4,5,6,7,8,8,6,3,2,1,2,3,6,8,7,5,2,0,0,0,2,5,7,7,4,1,0,99,0,1,4,7,7,5,2,0,0,0,2,5,7,8,6,3,2,1,2,3,6,8,8,7,6,5,4,5,6,7,8,9,8,8,7,7,7,8,8,9}
+
+' Generate Maps
+10  INK 6: PAPER 0: BORDER 0: BRIGHT 0: FLASH 0 : CLS
+    status("         Miner 6.8 By Arda")
+
+
+mainmenu:
+
+	print at 3,11;"the Digger"
+	print at 6,5;"1. Dig Dutchman's Mine!"
+	print at 7,5;"2. Dig random cave"
+	print at 8,5;"3. Load a cave"
+
+		
+	mainmkey:
+	a$=inkey$
+		
+	if a$="" then goto mainmkey: end if
+	if a$="1" then goto 30: end if
+	if a$="2" then goto 20: end if
+	if a$="3" then print "insert tape and locate map, press a key":pause 200: load"" code map: end if
+	goto mainmkey
+
+	
+20  for y=0 to 159
+      for x=0 to 47
+         zar=RND*500
+         if zar>50 then
+            'put dirt
+            poke (map + (y*48) + x),210
+         else
+           'put rock
+            poke (map + (y*48) + x),241
+            'reroll to create boxes of rocks
+            zar=int(RND*5) 
+            if zar=1 then
+                   poke (map + ((y-1)*48) + x),241
+               elseif zar=2 then
+                   poke (map + ((y)*48) + (x-1)),241
+            end if
+         end if
+      next x
+      PRINT INK 7;AT 0,9;y;"/159"
+     next y
+
+      tot=0
+     for  k=0 to 159 step 17
+         for y=k  to (k+20)
+              for x=2 to 62
+                  zar = RND * 1000
+                  if ((zar > ((y/4)+1000-((96-(y-k))))) ) then
+                      yy = y
+                      if (y > 158) then yy = 158: End if
+                      ti=3+(k / 18)
+                      'if ti>9 then ti=1  :end if
+                      stat=(tilestats(ti,0)-1) SHL 2
+                      stat=stat bOR (tilestats(ti,1)-1)
+                      cell= stat SHL 4
+                      cell= cell bOR ti
+                      poke (map + (yy*48) + x), cell
+                      tot=tot+1
+					  values=values+tilePrice(ti)
+                  end if
+              next x
+          next y
+          PRINT INK 7;AT 0,2;"(";k;"/159) Gems:";tot;" Value:";values
+      next k
+	  
+	  for x=map+7680 to map+7680+48
+		poke x,241
+	  next x
+
+	  burnTown()
+	  
+	  zar=0.5
+	status("READY. ")
+
+30  prMoney()
+    pause 100
+
+    BIFROSTstart()
+	clearBoard()
+	
+100	if bifrostRefresh=1 then
+		refreshScreen()
+	end if	
+
+	if ps=0 then ps=1: else : ps=0 : end if
+     
+    BIFROSTsetTile(4, 4, BIFROSTSTATIC + ps+psr+psa)
+
+	if forceUpdate then forceRefresh() : end if
+
+	'check floor  (why is this here? = poor design)
+	'checks if player is falling thru a gap
+    tempK=headingY
+	tempL=headingX
+	headingY=1
+	headingX=0
+	gosub gettilestats
+	if (tileType=0 or (tileType=12 and stat=10) or cell=255)and psr<>31 then
+		py=py+1
+		bifrostRefresh=1
+		falling=falling+1
+
+	else
+		if falling>4 then
+			print ink 2; at 20,0;"> Too high!" 
+			rescueNow()
+		end if
+		falling=0
+		headingY=tempK
+	    headingX=tempL
+	end if
+        'end check floor
+	
+	'check elevators
+	if elevator<>0 then
+		'going down
+		tempK=headingY
+		tempL=headingX
+		headingY=elevator
+		headingX=0
+		gosub gettilestats
+		if tileType=12 and stat=10 then
+			headingY=0:gosub puttilestats
+			tileType=15: tilePrec=3:tilePower=3: headingY=elevator: gosub puttilestats
+			py=py+elevator
+			bifrostRefresh=1
+		else
+			elevator=0
+		end if
+		headingY=tempK
+	    headingX=tempL
+	
+	end if
+	
+	
+
+	'MAIN LOOP
+210 yy= peek(23673)
+    frame= yy*255 +peek(23672)
+    diffFrame=frame-lastFrame
+	
+
+    if diffFrame>1 then 'this executes 1/50th seconds
+		second=second+diffFrame
+		if second>50 then
+			second=second-50
+			'a second is passed
+			
+			if lantern<>10 then energy=energy-1: end if
+			
+			'print energy
+			if energy<200 then 
+				Print ink 2; flash 1; AT 1,20;energy;" "
+			elseif energy<400 then 
+				Print ink 6; AT 1,20;energy;" "
+			else
+				Print ink 5; AT 1,20;energy;" "
+			end if
+			
+			
+			statusTimeout=statusTimeout+1
+			if statusTimeout=5 then 
+				statusClear()
+			end if
+		end if
+         'border 4
+         lastFrame=frame
+         if collapsePointer>0 then
+			'something needs to collapse
+			for x=0 to collapsePointer-1
+				if collapseActive(x)>0 then
+					
+					'time is running out
+					 
+					 if (rnd > 0.7) then
+					 sound=diffFrame
+					 'print ink 0;at 20,0;zar;" "
+					 else
+					 border 2
+					 end if
+					'border 2
+					collapseActive(x)=collapseActive(x)-(1+(diffFrame/4))
+					if collapseActive(x)<1 then
+						'it's time to collapse this one
+						CollapseNow(collapse(x,0),collapse(x,1))
+						bifrostRefresh=1
+					end if
+				
+				end if
+				
+			next x
+			UpdateCollapsePointer
+			border 0
+		end if
+        'border 0
+		if py=1 then 
+			'%50 chance we are in town
+			if px>townpos and px<townpos+14 then
+				if lantern<10 then
+					lanternTown=lantern
+					lanternCrop=4
+					lantern=10
+				end if
+			elseif lantern=10 then
+				lantern=lanternTown
+				getCrop()
+				clearBoard()
+				bifrostRefresh=1
+			end if
+			
+			if px=townpos+3 then
+
+				showStore()
+								
+			elseif px=townpos+11 then
+
+'	***TENT***
+
+				sound=energy/100
+				energy=energy+87
+				if energy>energyMax then energy=energyMax: end if
+				'print status
+				Print ink 4; AT 1,20;energy;" "
+				
+			elseif inStore=1 then
+' *** leaving store ***
+				inStore=0
+				lastItem=99
+				'clear shop text
+				for x=3 to 19
+					print at x,20;"            "
+				next x
+			end if
+			
+		end if
+    end if
+
+
+	if falling>0 or elevator<>0 then
+	   'falling, so disable inputs
+	   goto 100
+	end if
+	
+	if sound>0 then 
+		 asm
+		 Halt
+		 end asm
+		 beep 0.002,sound
+		 sound=0
+	end if
+	
+	PRINT INK 7;AT 0,0;px;"/";py;" "
+	
+	LET a$=INKEY$
+	IF a$="" THEN
+		if bifrostRefresh=1 then goto 100: end if
+		GO TO 210
+	END IF
+	
+	psa=0 'psa=digging animation sprite modifier
+	
+	'print status
+	x=4: y=0
+	
+    if a$="p" and px<(mapsize-1) then
+      headingX=1
+      headingY=0
+      psr=41
+      gosub gettilestats 
+      if (tileType>11) or (tileType=0) then
+		px=px+1
+		bifrostRefresh=1
+		energy=energy-1
+      end if
+	  
+	  sound=15
+	  GO TO 100
+    end if
+
+    if a$="o" and px>0  then
+      headingX=-1
+      headingY=0
+      psr=38
+      gosub gettilestats 
+      if (tileType>11) or (tileType=0) then
+		px=px-1
+		bifrostRefresh=1
+		energy=energy-1
+      end if
+	  
+	  sound=15
+	  GO TO 100
+    end if
+
+    if a$="a" and py<159 then
+
+		if inStore=1 then
+			item=item+1
+			if item=12 then item=11: end if
+			sound=item
+			goto 100
+			
+		end if
+		if psr=31 then
+			'user is in the elevator!
+			'so, move elevator down
+			elevator=1
+		else
+		  headingY=1
+		  headingX=0
+		  psr=35
+		  gosub gettilestats 
+		  if tileType=13
+		    psr=32
+			py=py+1
+			bifrostRefresh=1
+			energy=energy-1
+		  end if
+		  
+		  sound=16
+		  
+		  GO TO 100
+		end if
+	
+	end if
+
+    if a$="q" and py>0  then
+	
+		if inStore=1 then
+			item=item-1
+			if item<0 then item=0 : end if
+			sound=item
+			goto 100
+		end if
+		if psr=31 then
+			'user is in the elevator!
+			'so, move elevator down
+			elevator=-1
+		else
+		  
+		  headingY=0
+		  headingX=0
+		  
+		  psr=32
+		  gosub gettilestats 
+		  headingY=-1
+		  if tileType=13
+			gosub gettilestats
+			if (tileType>11) or (tileType=0) then
+				py=py-1
+				bifrostRefresh=1
+				energy=energy-1
+			end if
+		  end if
+		  
+		  sound=14
+
+		  GO TO 100
+		end if
+	
+	end if
+
+    if a$="m" then
+	
+		if inStore=1 then
+			buyNow()
+		end if
+	
+        gosub gettilestats
+		
+        if tileType>1 and tileType<12 then
+			'this is a breakable tile
+     	   psa=1	
+		   energy=energy-axeWg
+		
+		   bip=10+tileType+tilePower+tilePrec
+           sound=bip
+		   
+		   'first drop tile precision
+           tilePrec=tilePrec-axePrec
+
+		   'if tile precision is below zero, drop tile power and restore precision to initial value
+           if tilePrec<0 then
+              tilePower=tilePower-1
+              if tilePower>=0 then tilePrec=tilestats(tileType,0): end if
+          
+           end if
+
+		   'also if axe is powerful, drop one tilepower too!
+           if tilePower>0 then
+              tilePower=tilePower-axePower
+           end if
+
+		   'now, a tile is only destroyed if it's power and precision is BELOW ZERO
+           if (tilePower<0 and tilePrec<0) then
+              'tile destroyed
+			  bifrostRefresh=1
+			  
+			  'check if this is valuable tile
+			  if tileType>2 then
+				  if (sackpointer<sacksize) then
+
+					 sack(tileType)=sack(tileType)+1
+					 sackpointer=sackpointer+1
+
+					 
+					 print ink 6; at 20,0;" Collected:"; ink 4; tiles(tileType);"(";sacksize-sackpointer;")"
+					 print ink 5;at 2,20; "S ";sacksize-sackpointer;" "
+				     statusTimeout=0
+					 sound= 20+tileType
+					 if sacksize-sackpointer<1 then print ink 2; at 2,20;"FULL ": end if
+
+				  else
+					 print ink 2; at 21,0;flash 1;"* Item Lost! Sack is full! *"
+					 statusTimeout=0
+				    sound=3
+					end if
+			  end if
+			  
+			  'let's check if there is a rock up there
+			  tempY=py
+			  py=py-1
+			  gosub gettilestats
+			  py=tempY
+			  
+			  if tileType=1 or tileType=13 then
+			  
+			  	'there is rock or ladder here! add it to the collapse queue
+				collapse(collapsePointer,0)=px+headingX
+				collapse(collapsePointer,1)=py+headingY-1
+				collapseActive(collapsePointer)=100
+				
+				if tileType=13 then 
+				   collapseActive(collapsePointer)=1
+				end if
+				collapsePointer=collapsePointer+1
+				
+			  end if
+			  
+			  'proceed destroying block
+			  tileType=0
+              tilePower=0
+              tilePrec=0
+			  
+
+           else
+              if tilePower<0 then tilePower=0 : end if
+              if tilePrec<0 then tilePrec=0   : end if
+           end if
+
+           gosub puttilestats
+        else 
+			if tileType=1 then sound=40:end if
+		end if
+		GO TO 100
+    end if
+
+	if a$="n" then
+		putLadder()
+		GO TO 100
+	end if
+    
+    if a$="L" then 
+		if lantern<>10 then
+			'lantern=lantern+1 
+			'if lantern>level(0) then lantern=level(0) :end if
+			'lantern=level(0)
+			lantern=lantern+1 
+			getCrop()
+			bifrostRefresh=1
+		end if
+	end if
+	
+    if a$="l" then 
+		if lantern<>10 then
+			'lantern=lantern-1 
+			'if lantern>100 then lantern=0 :end if
+			
+			lantern=0
+			getCrop()
+			clearBoard()
+			bifrostRefresh=1
+		end if
+	end if
+
+	if a$="h" then
+	    
+		print at 3,20;"HALT"
+		lockKey
+		paus:
+		tempS=inkey$
+		if tempS="" then goto paus : end if
+		print at 3,20;"    "
+		lockKey
+	end if 
+	
+	if a$=chr$(13) then
+		'enter is pressed
+		'print storeItems(selectedItem,selectedItem);":";price(selectedItem,0)
+		MenuSel()
+	end if
+	
+    if a$="F" then 
+		'gosub drawmap
+		money=money+1000
+		prMoney()
+	end if
+
+    if a$="r" then 
+		'goto 20
+		rescueNow()
+	end if
+
+    'gosub gettilestats
+
+    'print ink 6; at 4,19; stat; ":";tilePrec;"/";tilePower;"/"
+    'print ink 6; at 2,19; tileType; ":"; tiles(tileType,0);" "
+    'PRINT INK 7;AT 0,4; " x";px; "/y"; py;" hy";headingY;headingX;"hx ";
+    asm
+        halt
+    end asm
+
+    sound=15
+
+220 GO TO 100
+sub lockKey
+pauso:
+	'wait until key release
+	tempS=inkey$
+	if tempS<>"" then goto pauso : end if
+
+end sub
+
+sub rescueNow()
+		
+		'clear everything
+		beep 0.01,20
+		beep 0.01,10
+		beep 0.02,2
+		clearBoard()
+		burnTown()
+		lockKey()
+		
+		'empty sack
+		sackpointer=0
+		
+		'reset position
+		px=townpos+15
+		py=1
+		bifrostRefresh=1
+		
+		'message
+		status("You had to be rescued!")
+		
+end sub
+
+
+sub showStore()
+
+	'  **************			
+	'  *** STORE! ***
+	'  **************
+
+	if inStore=0 then
+		'first enter
+		inStore=1
+		print at 4,20;ink 2;bright 1;"Buy:   ";ink 1;"up/dn"
+
+		BIFROSTsetTile(3, 3, 255)
+		BIFROSTsetTile(3, 4, 255)
+		BIFROSTsetTile(4, 3, 255)
+
+		print at 7,7;ink 4;"WELL"; at 8,7;"COME";
+		
+		if sackpointer>0 then 
+		
+			'clear store screen
+			for x=3 to 11
+				print at 9+x,20;"            "
+			next x
+			
+			'empty sack
+			total=0
+			for x=3 to 11
+				if sack(x)>0 then
+					k=sack(x)*tilePrice(x)
+					print at 7+x,20;tiles(x)(0 to 2);"x";sack(x);"=";k;
+					total=total+k
+					sack(x)=0
+				end if
+			next x
+			
+			if total>0 then
+				sackpointer=0
+				print ink 1; bright 1; at 2,24+(7-len(str(total)));"+";total
+				money=money+total
+				prMoney()
+				print at 22,0;"                       " ' erase sack full message
+			end if
+			
+		end if
+		
+	end if
+
+	'show menu on item change
+	if lastItem<>item then
+		lastItem=item
+		print at 5,20;"            ";at 6,20;"            ";at 7,20;"            "
+
+
+		if item < 6 then
+			if storeItems(item,level(item+1))="" then
+				print at 5,20;ink 1;item+1;".";ink 6;storeItems(item, 0);at 6,20;"(Maxed) "
+			else
+				print at 5,20;ink 1;item+1;".";ink 6;storeItems(item, 0);at 6,20;ink 7;storeItems(item,level(item)+1);at 7,27; ink 4;"$";price(item,level(item)+1) 
+			end if
+			
+		else
+			print at 5,20;ink 1;item+1;".";ink 6;"Tool";at 6,20;ink 7;storeItems(item,0);at 7,20;"(";price(item,0);")    ";at 7,27; ink 4;"$";price(item,level(item)+1)
+		end if
+		
+	end if
+	
+end sub
+
+sub buyNow()
+
+	'*****
+	'*buy*
+	'*****
+
+	if (money>=(price(item,level(item)+1))) then
+		if item>5 and item<12 then
+			if (price(item,0)<120) then 
+				money=money-price(item,1)
+				price(item,0)=price(item,0)+1 'this is INVENTORY! :) conserving 25 bytes here
+				print at 20,0;ink 5;" ";storeItems(item,0);"(s): ";price(item,0)
+				statusTimeout=0
+			else
+				print at 20,0;ink 2;" * Can't buy anymore *"
+				statusTimeout=0
+			end if
+		else
+		
+			'other upgrades
+			if storeItems(item,level(item)+1)<>"" then
+				level(item)=level(item)+1
+				
+				money=money-price(item,level(item))
+				
+				print at 20,0;ink 5;" Upgraded ";storeItems(item,0);" to ";storeItems(item,level(item))
+				
+				statusTimeout=0					
+			end if
+		end if
+		'using non-indexed variables for speed
+		lanternTown=level(0)
+		axeWg=5-level(5)
+		axePower=1+level(4)
+		axePrec=level(3)
+		sacksize=10+(level(1)*4)
+		energyMax=1000+(level(2)*250)
+		inStore=0
+		lastItem=99
+		prMoney()
+		sound=30
+	end if
+	goto 100
+			
+end sub
+
+sub putSupport()
+
+	if price(6,0)>0 then
+		
+		tempX=headingX
+		tempY=headingY
+		
+		'put a ladder
+		headingX=0
+		headingY=0
+		gosub gettilestats
+		
+		if tileType=0 then
+			headingY=-1
+			gosub gettilestats
+			if tileType=1 then 'only for rocks
+				PokeTile(px,py,14,0,0)
+				sound=40
+				price(6,0)=price(6,0)-1
+			end if
+		end if
+		
+		headingX=tempX
+		headingY=tempY
+		
+	end if
+	
+end sub
+
+sub putLadder()
+	if price(7,0)>0 then
+		tempX=headingX
+		tempY=headingY
+		'put a ladder
+		headingX=0
+		headingY=0
+		gosub gettilestats
+		if tileType=0 then
+			headingY=-1
+			gosub gettilestats
+			if tileType=0 or tileType>12 then
+				PokeTile(px,py,13,0,0)
+				sound=40
+				price(7,0)=price(7,0)-1
+				status("Ladders left: "+ str(price(7,0)))
+			end if
+		end if
+		headingX=tempX
+		headingY=tempY
+		
+	end if
+end sub
+
+sub putWalkway()
+
+	if price(8,0)>0 then
+		headingY=1
+		gosub gettilestats
+		if tileType=0 then
+		
+			'empty space, put a walkway here
+			tileType=12
+			tilePrec=3
+			tilePower=1
+			gosub puttilestats
+			price(8,0)=price(8,0)-1
+		
+		end if
+	end if
+	
+end sub
+
+sub putElevator()
+	if price(10,0)>0 then
+		'start putting elevator
+		headingX=0
+		headingY=0
+		gosub gettilestats
+		
+		if py>3 and tileType=0 and py<157 then
+			'start putting elevator
+
+			'now check below
+			tempY=py+8
+			if tempY>158 then tempY=158: end if
+
+				headingY=1
+				headingX=0
+				tempK=py
+				
+				for tempX=tempK to tempY
+					'crush all tiles beneath the shaft
+					'*OR* gosub gettilestats
+					
+					tileType=12
+					tilePrec=2
+					tilePower=2
+					gosub puttilestats
+					py=py+1
+				next tempX
+
+				tileType=1
+				gosub puttilestats
+				py=tempK
+				headingY=0
+				tileType=15: tilePrec=3: tilePower=3: gosub puttilestats
+				elevator=0
+				price(10,0)=price(10,0)-1
+				bifrostRefresh=1
+				
+		end if
+		status("Elevator PUT!")
+	end if
+end sub
+
+sub putShaft()
+	if price(11,0)>0 then
+		'add rail
+		if tiletype=12 then
+		end if
+		status ("shaft added")
+	end if
+end sub
+sub getCrop()
+	
+	if lantern>6 then lanternCrop=4 : return :end if
+	if lantern>3 then lanternCrop=3 : return :end if
+    if lantern>0 then lanternCrop=2 : return :end if
+	lanternCrop=1
+end sub
+
+gettilestats:
+    'returns tileType, tilePrec, tilePower
+    cell=PEEK(map+(((py+headingY)*mapsize)+(px+headingX)))
+    stat=cell SHR 4
+    tileType= cell bAND 15
+    tilePrec= stat SHR 2
+    tilePower= stat bAND 3
+
+return
+
+puttilestats:
+    'inputs px+headingX,py+headingY =tile cell to write (0-maxX) (0-maxY)
+    '       tileprec, tilePower = tile stats (0-3)(0-3)
+    '       tileType = base tile type  (0-15)
+
+    stat= (tilePrec) SHL 2
+    stat= stat bOR (tilePower)
+    cell= stat SHL 4
+    cell= cell bOR tileType
+    poke (map+(((py+headingY)*mapsize)+(px+headingX))), cell
+
+return
+
+'------
+drawmap:
+
+tempX=px
+tempY=py
+px=0:py=0
+headingX=0
+headingY=0
+
+ink 5: plot 205,9: draw 50,0:draw 0,160:draw -50,0:draw 0,-160
+
+for y=169 to 10 step -1
+ for x=206 to 254
+	px=x-160:py=y-8
+	gosub gettilestats
+	if (tileType<>0 ) then
+		plot ink 5; x,192-y
+	end if
+ next x
+next y
+
+px= tempX
+py= tempY
+
+
+500 LET a$=INKEY$
+plot ink 5; over 1; px-160,py-8
+IF a$="" THEN
+   GO TO 500
+END IF
+
+
+
+return
+
+
+
+' ************
+' *   MENU   *
+' ************
+
+sub MenuSel()
+
+	if inStore then return: end if
+	
+	inMenu=1
+    'update inventory bar
+	print at 20,0; ink 2; "SUP LAD WWY KIT ELE RDR "
+	for tempX=0 to 5
+		print ink 5; at 21,tempX*4;price(tempX+6,0)
+	next tempX
+	goto menustat
+	
+	menukey:
+	lockKey()
+	menukeycheck:
+	a$=inkey$
+	if a$="" then goto menukeycheck: end if
+	
+	if a$="o" and selectedItem>0 then selectedItem=selectedItem-1 : end if
+	if a$="p" and selectedItem<5 then selectedItem=selectedItem+1 : end if
+	if a$=chr(13) then goto safeexit : end if 
+	
+	if a$="m" then
+		if selectedItem=0 then
+			putSupport()
+			goto safeexit
+		elseif selectedItem=1 then
+			putLadder()
+			goto safeexit
+		elseif selectedItem=2 then
+			putWalkway()
+			goto safeexit
+		elseif selectedItem=3 then
+			'useMediKit()
+			if price(9,0)>0 then
+				energy=energy+250
+				price(9,0)=price(9,0)-1
+			end if
+			goto safeexit
+		elseif selectedItem=4 then
+			putElevator()
+			goto safeexit
+		elseif selectedItem=5 then
+			putSysmicCharge()
+			goto safeexit
+		end if
+	end if
+	menustat:
+	print over 1; ink 2; bright 0; at 20,0;"                                "
+	print over 1; at 20,selectedItem*4; ink 6; bright 1;"    " 
+	asm
+		halt
+	end asm
+	beep 0.05,10
+	goto menukey
+	
+	safeexit:
+	inMenu=0
+	sound=14+selectedItem
+	statusTimeout=0
+	
+end sub
+
+sub UpdateCollapsePointer() 
+	'cleans collapse list and updates collapsepointer
+    tempX=0
+	for x=0 to collapsePointer
+		if (collapseActive(x)>0) then
+			'this work is done, erase
+			if tempX<>x then
+				collapse(tempX,0)=collapse(x,0)
+				collapse(tempX,1)=collapse(x,1)
+				collapseActive(tempX)=collapseActive(x)
+				collapseActive(x)=0
+			end if
+			tempX=tempX+1
+		end if
+	next x
+	if collapsePointer=tempX then return : end if
+	collapsePointer=tempX
+	bifrostRefresh=1
+
+        if collapsePointer=0 then
+           'reset frame counter
+           poke 23672,0
+           poke 23673,0
+        end if
+	'print ink 2+rnd*4; at 21,5;"C";tempX
+	
+end sub
+
+sub PokeTile(cx as ulong, cy as ulong,tileType2 as byte, tilePrec2 as byte, tilePower2 as byte )
+
+    stat= (tilePrec2) SHL 2
+    stat= stat bOR (tilePower2)
+    cell= stat SHL 4
+    cell= cell bOR tileType2
+    poke  (map+(cy*mapsize)+cx), cell
+	
+    
+end sub
+
+
+'collapses only same types of tiles
+sub CollapseNow (cx as integer,cy as integer)
+
+
+	'print ink 4; at 20,0;"cx";cx;" cy";cy-1;" collapsing"
+	'collapses things
+	tempL=headingX
+	tempK=headingY
+	tempX=px
+	tempY=py
+	'first check if it's still empty under it
+	headingX=0
+	headingY=0
+	px=cx
+	py=cy
+	
+	gosub gettilestats 'get collapsing tile
+	oTile=tileType
+	'oPrec=tilePrec
+	'oPow=tilePower
+	
+	headingY=1          'under it,
+	  'check if empty space under it
+	for py=cy to maxdepth
+		gosub gettilestats
+		if tileType<>0 then
+			exit for 
+		end if
+	next
+	oDeep=py
+		
+		
+	if oDeep>cy then
+		headingY=-1
+		for py=cy to 0 step -1
+			gosub gettilestats
+			if (tileType<>1) and (tileType<>13) then
+				exit for 
+			end if
+		next
+		oTop=py
+		oLot=(cy-oTop)+1
+
+		'collapse now
+		py=0
+		for y=oDeep to oTop step -1
+			if py<oLot then
+				'copy tile starting from cy!
+				cell=PEEK(map+((cy-py)*mapsize)+cx)
+				poke  (map+(y*mapsize)+cx), cell
+				'PokeTile(cx,y,oTile,oPrec,oPow)
+				if (tempX=cx) and (tempY=y) and (oTile=1) then
+					print ink 2+rnd*4; at 21,0;"> A boulder!!! "
+					dead=1
+					
+				end if
+				py=py+1
+			else
+				PokeTile(cx,y,0,0,0)
+			end if
+		next
+	end if
+		
+	'done collapsing.
+	
+	headingX=tempL
+	headingY=tempK
+	py=tempY
+	px=tempX
+	if dead then dead=0: rescueNow(): end if
+end sub
+
+sub clearBoard()
+	
+    'clear board
+    FOR tx=0 TO 8: FOR ty=0 TO 8
+        BIFROSTsetTile(ty, tx, BIFROSTSTATIC+28)
+    NEXT ty: NEXT tx
+
+end sub
+
+sub status(dump as string)
+	
+	print at 20,0;ink 6;dump;
+	for tempX=len(dump)+1 to 31
+		print " ";
+	next tempX
+	statusTimeout=0
+end sub
+
+sub statusClear
+	print at 20,0;"                                                                "
+end sub
+
+sub prMoney
+	print at 1,24;"      "
+	print ink 4; at 1,24+(7-len(str(money)));"$";money
+end sub
+
+sub forceRefresh()
+
+for tempX=1 to 5 'refresh 45 tile in 5 frames
+    'refresh here	
+	asm
+      Halt
+    end asm
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+    BIFROSTshowNextTile()
+	'poke 58620,255 'debugging
+next tempX
+    'endrefresh
+	
+sub refreshScreen()
+ 'bifrost refresh
+	
+	
+		cropX1=(4-lanternCrop) : cropX2=(4+lanternCrop)
+		if (px<4) and (lanternCrop>px) then
+		  tx=3-px
+		  for y=4-lanternCrop to 8-(4-lanternCrop)
+				 BIFROSTsetTile(y, tx, BIFROSTSTATIC+1)
+		  next y
+		  cropX1=tx+1
+		end if
+
+		if (px>43) and (lanternCrop>(47-px)) then
+   		  tx=4+(48-px)
+		  for y=4-lanternCrop to 8-(4-lanternCrop)		  
+				 BIFROSTsetTile(y, tx, BIFROSTSTATIC+1)
+		  next y
+		  cropX2=4+(48-px)-1
+		end if
+
+		'Town SKY box
+		cropY1=0
+		if lanternCrop>py and px<townpos+15 then 
+			cropY1=lanternCrop-py
+			FOR tx=cropX1 TO cropX2
+				FOR y=(4-lanternCrop) TO (4-lanternCrop+cropY1)-1
+					if lanternMask((y*9)+tx)<=lantern then
+						BIFROSTsetTile(y, tx, BIFROSTSTATIC+27)
+					end if
+				next y
+			next tx
+		end if 
+		
+		'Lantern view
+		FOR tx=cropX1 TO cropX2
+		  FOR y=(4-lanternCrop)+cropY1 TO 4+lanternCrop
+		     cell=PEEK(map+((py+(y-4))*48)+(px+(tx-4)))
+			 if lanternMask((y*9)+tx)<=lantern then '(y<>4) or (tx<>4)) or 
+			   stat= cell bAND 15 'this is not actually stat, using as temp
+			   if stat=12 then
+					stat=cell SHR 4
+					cell=16+stat
+					BIFROSTsetTile(y, tx, BIFROSTSTATIC + cell)
+				else
+					BIFROSTsetTile(y, tx, BIFROSTSTATIC + stat)
+			   end if
+			   
+			elseif cell=255 then
+				'print at 20,0;ink 0;cell;"CE":
+				if lanternMask((y*9)+tx)=99 then
+					ps=1:psr=31:psa=0:headingX=0:headingY=0
+				end if
+				
+			 end if
+		  NEXT y
+		NEXT tx
+		
+   	bifrostRefresh=0
+	
+end sub	
+	
+end sub
+
+sub burnTown()
+
+	  'now, burn town
+	  
+	  for y=0 to 7
+		for x=0 to 19
+		   tempS=town((y*20)+x)
+		 if tempS<>" " then
+			if tempS="#" then
+			 tileType=20
+			elseif tempS="+" then
+			 tileType=21
+			elseif tempS="*" then
+			 tileType=0
+			elseif tempS="R" then
+			 tileType=1
+     		elseif tempS="." then
+			 tileType=30
+			elseif tempS="F" then
+			 tileType=24
+			elseif tempS="O" then
+			 tileType=23
+			elseif tempS="D" then
+			 tileType=22
+			elseif tempS="1" then
+			 tileType=16
+			elseif tempS="2" then
+			 tileType=17
+			elseif tempS="3" then
+			 tileType=18
+			elseif tempS="4" then
+			 tileType=19
+			elseif tempS="L" then
+			 tileType=25
+			elseif tempS="I" then
+			 tileType=26
+			elseif tempS="X" then
+			 tileType=2
+			elseif tempS="G" then
+			 tileType=15
+		   end if
+		   
+		   
+			ti=12
+			stat=tileType-16
+		    cell= stat SHL 4
+		    cell= cell bOR ti
+			if tileType=15 then cell=15 SHL 4: cell=cell bOR 15: end if
+		    
+			if tileType=1 then cell=15 SHL 4: cell=cell bOR 1: end if
+		    if tileType=0 then cell=0: end if
+			if tileType=2 then cell=210: end if
+			
+			poke (map + (y*48) + x+townpos), cell
+		end if	
+		next x
+	  next y
+	  
+	  
+
+end sub
